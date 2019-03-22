@@ -1,0 +1,15 @@
+PLAY='
+{
+  "plays": [
+  {
+	"play": {
+		"action": "ls -las /tmp"
+	}
+}, {
+	"play": {
+		"action": "uptime"
+	}
+}
+]
+}
+'

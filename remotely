@@ -1,0 +1,143 @@
+#!/bin/bash
+#
+# Author: Alejandro Sanchez Acosta
+#
+# Copyright (c) 2019 Adobe Systems Incorporated. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+REGION="us-east-1"
+RUSER=$(whoami)
+
+show_help() {
+  USAGE="$(basename "$0") [-h] -- tool to manage AWS clusters
+
+where:
+    -h  show this help text
+    -f  filter host name (ex: public)
+    -c  command to run (ex: docker ps)
+
+Examples:
+    Check usage:
+     remotely -f \"proxy\" -c \"df -h\"
+    Check tmp and uptime in two tiers:
+     remotely -f \"proxy,master\" -c \"ls -l /tmp && uptime\"
+    Login via ssh:
+     remotely -f \"proxy\" -l 10.10.1.3
+"
+
+  echo "$USAGE"
+}
+
+OFILTER="public"
+
+while getopts "h?f:gc:l:r:p:u:m:o:" opt; do
+    case "$opt" in
+    h|\?)
+        show_help
+        exit
+        ;;
+    f) FILTER=$OPTARG
+        ;;
+    o) OFILTER=$OPTARG
+        ;;
+    g) GET="true"
+       ;;
+    c) COMMAND=$OPTARG
+       ;;
+    l) IP=$OPTARG
+       ;;
+    r) REGION=$OPTARG
+       ;;
+    p) PLAYBOOK=$OPTARG
+       ;;
+    u) RUSER=$OPTARG
+       ;;
+    m) MODULE=$OPTARG
+       ;;
+    esac
+done
+shift $((OPTIND-1))
+
+AWSPUBLICFILTER="Name=tag:Name,Values=*${OFILTER}*"
+PUBLIC=$(aws ec2 describe-instances --region ${REGION} --filter "${AWSPUBLICFILTER}" | jq .Reservations | jq -r '.[] .Instances'  | jq -r '.[] .PublicIpAddress')
+echo "Bastion: "$PUBLIC
+
+filters=${FILTER//,/ }
+for filter in $filters
+do
+  echo "Group:" ${filter}
+  AWSFILTER="Name=tag:Name,Values=*${filter}*"
+
+  if [[ ${GET} == "true" ]]
+  then
+    aws ec2 describe-instances --region ${REGION} --filter "${AWSFILTER}" | jq .Reservations | jq -r '.[] .Instances'  | jq -r '.[]' | jq -r '"Id: \(.InstanceId) IP: \(.PrivateIpAddress)"'
+    exit
+  fi
+
+  if [[ $IP != "" ]]
+  then
+    ssh -q -i ssh.pem -o "StrictHostKeyChecking no" -o "ProxyCommand ssh -o 'StrictHostKeyChecking no' -q -W %h:%p -i ssh.pem ${RUSER}@${PUBLIC}" ${RUSER}@${IP} ${COMMAND}
+    exit
+  fi
+
+  if [[ $MODULE != "" ]]
+  then
+    case $MODULE in
+      "ping") for HOST in $(aws ec2 describe-instances --region ${REGION} --filter "${AWSFILTER}" | jq .Reservations | jq -r '.[] .Instances'  | jq -r '.[] .PrivateIpAddress'
+      )
+      do
+        echo $HOST
+        echo "ssh -4 -q -i ssh.pem ${RUSER}@${PUBLIC} ping ${HOST}"
+        ssh -4 -q -i ssh.pem ${RUSER}@${PUBLIC} "ping ${HOST}"
+        exit
+      done
+      ;;
+      "traceroute") for HOST in $(aws ec2 describe-instances --region ${REGION} --filter "${AWSFILTER}" | jq .Reservations | jq -r '.[] .Instances'  | jq -r '.[] .PrivateIpAddress'
+      )
+      do
+        ssh -4 -q -i ssh.pem ${RUSER}@${PUBLIC} "traceroute ${HOST}"
+        exit
+      done
+      ;;
+      "public") ssh -4 -q -i ssh.pem ${RUSER}@${PUBLIC}
+        exit
+      ;;
+    esac
+  fi
+
+  if [[ $PLAYBOOK != "" ]]
+  then
+    source $PLAYBOOK
+
+    for row in $(echo "${PLAY}" | jq -r '.plays[] | @base64'); do
+      PLAY=$(echo ${row} | base64 --decode)
+      ACTIONS=$(echo $PLAY | jq .play | jq .action)
+      for HOST in $(aws ec2 describe-instances --region ${REGION} --filter "${AWSFILTER}" | jq .Reservations | jq -r '.[] .Instances'  | jq -r '.[] .PrivateIpAddress'
+      )
+      do
+        echo "ssh -4 -q -i ssh.pem -o \"StrictHostKeyChecking no\" -o \"ProxyCommand ssh -4 -q -W %h:%p -i ssh.pem ${RUSER}@${PUBLIC}\" ${RUSER}@${HOST}" ${ACTIONS}
+        ssh -q -i ssh.pem -o "StrictHostKeyChecking no" -o "ProxyCommand ssh -o 'StrictHostKeyChecking no' -4 -q -W %h:%p -i ssh.pem ${RUSER}@${PUBLIC}" ${RUSER}@${HOST} ${ACTIONS}
+      done
+    done
+    exit
+  fi
+
+  for HOST in $(aws ec2 describe-instances --region ${REGION} --filter "${AWSFILTER}" | jq .Reservations | jq -r '.[] .Instances'  | jq -r '.[] .PrivateIpAddress'
+  )
+  do
+    echo "ssh -q -i ssh.pem -o \"StrictHostKeyChecking no\" -o \"ProxyCommand ssh -q -W %h:%p -i ssh.pem ${RUSER}@${PUBLIC}\" ${RUSER}@${HOST}" ${COMMAND}
+    ssh -4 -q -i ssh.pem -o "StrictHostKeyChecking no" -o "ConnectTimeout=1" -o "ConnectionAttempts=1" -o "StrictHostKeyChecking no" -o "ProxyCommand ssh -o 'StrictHostKeyChecking no' -4 -q -W %h:%p -i ssh.pem ${RUSER}@${PUBLIC}" ${RUSER}@${HOST} ${COMMAND}
+  done
+done
